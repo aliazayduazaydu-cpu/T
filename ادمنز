@@ -1,0 +1,1052 @@
+-- ============================================================================
+-- NEXUS 3D HOLOGRAM ADMIN (100% LocalScript Edition - Part 1: Core + 3D UI + 75 Commands)
+-- المكان: StarterPlayer -> StarterPlayerScripts -> LocalScript
+-- ============================================================================
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local Lighting = game:GetService("Lighting")
+local Debris = game:GetService("Debris")
+local Workspace = game:GetService("Workspace")
+
+local Player = Players.LocalPlayer
+local PlayerGui = Player:WaitForChild("PlayerGui")
+local Mouse = Player:GetMouse()
+
+-- إعدادات الألوان والثيم
+local Theme = {
+	Primary = Color3.fromRGB(0, 230, 255),
+	Secondary = Color3.fromRGB(150, 75, 255),
+	Bg = Color3.fromRGB(9, 13, 24),
+	Panel = Color3.fromRGB(16, 22, 38),
+	Card = Color3.fromRGB(22, 31, 52),
+	CardHover = Color3.fromRGB(35, 50, 82),
+	Text = Color3.fromRGB(240, 247, 255),
+	SubText = Color3.fromRGB(145, 165, 195),
+	Success = Color3.fromRGB(60, 235, 145),
+	Danger = Color3.fromRGB(255, 80, 110),
+}
+
+-- حالة النظام والربط
+local State = {
+	IsOpen = false,
+	FollowMode = false,
+	AlwaysOnTop = false,
+	SelectedCategory = "الكل",
+	SearchQuery = "",
+	PanelDistance = 8.5,
+	PanelHeight = 1.6,
+	AnchorCF = CFrame.new(),
+	HoloPart = nil,
+	SurfaceGui = nil,
+	SelectionBox = nil,
+	Light = nil,
+	Connections = {},
+
+	-- حالات الأوامر
+	Flying = false,
+	FlySpeed = 75,
+	FlyBV = nil,
+	FlyBG = nil,
+	Noclip = false,
+	InfJump = false,
+	Spinning = false,
+	SpinSpeed = 12,
+	AuraLoop = false,
+	AuraHighlight = nil,
+	SavedPos = nil,
+	LastPos = nil,
+	Freecam = false,
+	FreecamCF = CFrame.new(),
+	WeatherFolder = nil,
+	BuildsFolder = nil,
+	MusicSound = nil,
+	DefaultLighting = {},
+}
+
+local UI = {}
+local Commands = {}
+local CategoryList = { "الكل" }
+local CategoryLookup = { ["الكل"] = true }
+
+-- حفظ الإضاءة الأصلية
+do
+	State.DefaultLighting = {
+		ClockTime = Lighting.ClockTime,
+		Brightness = Lighting.Brightness,
+		Ambient = Lighting.Ambient,
+		OutdoorAmbient = Lighting.OutdoorAmbient,
+		FogEnd = Lighting.FogEnd,
+		FogStart = Lighting.FogStart,
+		FogColor = Lighting.FogColor,
+		GlobalShadows = Lighting.GlobalShadows,
+	}
+end
+
+-- أدوات مساعدة عامة (متاحة لكل الحزم)
+local API = {}
+
+function API.GetChar()
+	return Player.Character
+end
+
+function API.GetHum()
+	local c = Player.Character
+	return c and c:FindFirstChildOfClass("Humanoid")
+end
+
+function API.GetHRP()
+	local c = Player.Character
+	return c and c:FindFirstChild("HumanoidRootPart")
+end
+
+function API.GetBuildsFolder()
+	if not State.BuildsFolder or not State.BuildsFolder.Parent then
+		local f = Workspace:FindFirstChild("NexusLocalBuilds") or Instance.new("Folder")
+		f.Name = "NexusLocalBuilds"
+		f.Parent = Workspace
+		State.BuildsFolder = f
+	end
+	return State.BuildsFolder
+end
+
+function API.GetWeatherFolder()
+	if not State.WeatherFolder or not State.WeatherFolder.Parent then
+		local f = Workspace:FindFirstChild("NexusLocalWeather") or Instance.new("Folder")
+		f.Name = "NexusLocalWeather"
+		f.Parent = Workspace
+		State.WeatherFolder = f
+	end
+	return State.WeatherFolder
+end
+
+function API.PlaySound(id: string, volume: number?, pitch: number?)
+	local s = Instance.new("Sound")
+	s.SoundId = id
+	s.Volume = volume or 0.45
+	s.PlaybackSpeed = pitch or 1
+	s.Parent = PlayerGui
+	s:Play()
+	Debris:AddItem(s, 4)
+end
+
+function API.Notify(msg: string, isErr: boolean?)
+	if UI.StatusLabel then
+		UI.StatusLabel.Text = (isErr and "✖ " or "✔ ") .. msg
+		UI.StatusLabel.TextColor3 = isErr and Theme.Danger or Theme.Success
+	end
+	if isErr then
+		API.PlaySound("rbxassetid://6518811702", 0.35, 0.85)
+	else
+		API.PlaySound("rbxassetid://6026984224", 0.35, 1.1)
+	end
+end
+
+function API.Register(cmd)
+	if not CategoryLookup[cmd.Category] then
+		CategoryLookup[cmd.Category] = true
+		table.insert(CategoryList, cmd.Category)
+	end
+	table.insert(Commands, cmd)
+end
+
+-- تنظيف المؤثرات على الإضاءة
+function API.ClearLightingEffects()
+	for _, v in ipairs(Lighting:GetChildren()) do
+		if v.Name == "NexusLightingFX" then
+			v:Destroy()
+		end
+	end
+end
+
+-- ============================================================================
+-- بناء زر الاستدعاء الوحيد الصغير (لا يملأ الشاشة)
+-- ============================================================================
+local function CreateLauncherButton()
+	local sg = Instance.new("ScreenGui")
+	sg.Name = "NexusLauncherGui"
+	sg.ResetOnSpawn = false
+	sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	sg.Parent = PlayerGui
+
+	local btn = Instance.new("TextButton")
+	btn.Name = "SummonHoloBtn"
+	btn.Size = UDim2.fromOffset(155, 40)
+	btn.Position = UDim2.new(0.5, -77, 0, 14)
+	btn.BackgroundColor3 = Theme.Bg
+	btn.BackgroundTransparency = 0.15
+	btn.Text = "⚡ قائمة الأوامر [F2]"
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 14
+	btn.TextColor3 = Theme.Primary
+	btn.AutoButtonColor = false
+	btn.Parent = sg
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(1, 0)
+	corner.Parent = btn
+
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Theme.Primary
+	stroke.Thickness = 1.6
+	stroke.Parent = btn
+
+	UI.LauncherBtn = btn
+	UI.LauncherStroke = stroke
+end
+
+-- ============================================================================
+-- بناء القائمة الهولوجرامية الـ 3D الطائرة في العالم
+-- ============================================================================
+local RefreshCommandGrid -- تعريف مسبق
+
+local function Build3DInterface()
+	-- إنشاء المجسم الطائر
+	local part = Instance.new("Part")
+	part.Name = "Nexus3DHologramPanel"
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanQuery = false
+	part.CastShadow = false
+	part.Material = Enum.Material.Glass
+	part.Color = Theme.Bg
+	part.Transparency = 0.92
+	part.Size = Vector3.new(11.5, 7.4, 0.14)
+	part.Parent = Workspace
+	State.HoloPart = part
+
+	-- إطار نيون محيط بالمربع
+	local box = Instance.new("SelectionBox")
+	box.Adornee = part
+	box.Color3 = Theme.Primary
+	box.LineThickness = 0.035
+	box.SurfaceTransparency = 1
+	box.Parent = part
+	State.SelectionBox = box
+
+	-- إضاءة تنبعث من الهولوجرام على المكان المحيط
+	local light = Instance.new("PointLight")
+	light.Color = Theme.Primary
+	light.Brightness = 1.6
+	light.Range = 14
+	light.Parent = part
+	State.Light = light
+
+	-- واجهة SurfaceGui داخل PlayerGui ومربوطة بالـ Part لتكون قابلة للضغط 100%
+	local surf = Instance.new("SurfaceGui")
+	surf.Name = "Nexus3DSurface"
+	surf.Adornee = part
+	surf.Face = Enum.NormalId.Front
+	surf.SizingMode = Enum.SurfaceGuiSizingMode.FixedSize
+	surf.CanvasSize = Vector2.new(1150, 740)
+	surf.LightInfluence = 0
+	surf.AlwaysOnTop = State.AlwaysOnTop
+	surf.ResetOnSpawn = false
+	surf.ClipsDescendants = true
+	surf.Parent = PlayerGui
+	State.SurfaceGui = surf
+
+	-- الإطار الرئيسي للواجهة
+	local root = Instance.new("Frame")
+	root.Size = UDim2.fromScale(1, 1)
+	root.BackgroundColor3 = Theme.Bg
+	root.BackgroundTransparency = 0.08
+	root.BorderSizePixel = 0
+	root.Parent = surf
+
+	local rootCorner = Instance.new("UICorner")
+	rootCorner.CornerRadius = UDim.new(0, 22)
+	rootCorner.Parent = root
+
+	local rootStroke = Instance.new("UIStroke")
+	rootStroke.Color = Theme.Primary
+	rootStroke.Thickness = 3
+	rootStroke.Parent = root
+
+	local grad = Instance.new("UIGradient")
+	grad.Color = ColorSequence.new({
+		ColorSequenceKeypoint.new(0, Color3.fromRGB(16, 26, 48)),
+		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(9, 13, 24)),
+		ColorSequenceKeypoint.new(1, Color3.fromRGB(22, 14, 42)),
+	})
+	grad.Rotation = 45
+	grad.Parent = root
+
+	-- الشريط العلوي (Header)
+	local header = Instance.new("Frame")
+	header.Size = UDim2.new(1, -30, 0, 72)
+	header.Position = UDim2.fromOffset(15, 12)
+	header.BackgroundColor3 = Theme.Panel
+	header.BackgroundTransparency = 0.2
+	header.Parent = root
+	Instance.new("UICorner", header).CornerRadius = UDim.new(0, 14)
+
+	local title = Instance.new("TextLabel")
+	title.Size = UDim2.new(0, 380, 1, 0)
+	title.Position = UDim2.fromOffset(20, 0)
+	title.BackgroundTransparency = 1
+	title.Text = "⚡ NEXUS 3D HOLOGRAM"
+	title.Font = Enum.Font.GothamBlack
+	title.TextSize = 26
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextColor3 = Theme.Primary
+	title.Parent = header
+
+	local countBadge = Instance.new("TextLabel")
+	countBadge.Size = UDim2.fromOffset(150, 34)
+	countBadge.Position = UDim2.fromOffset(375, 19)
+	countBadge.BackgroundColor3 = Theme.Secondary
+	countBadge.BackgroundTransparency = 0.2
+	countBadge.Text = #Commands .. " أمر"
+	countBadge.Font = Enum.Font.GothamBold
+	countBadge.TextSize = 16
+	countBadge.TextColor3 = Theme.Text
+	countBadge.Parent = header
+	Instance.new("UICorner", countBadge).CornerRadius = UDim.new(1, 0)
+	UI.CountBadge = countBadge
+
+	-- أزرار التحكم بالمربع الطائر في الهيدر
+	local function makeHeaderBtn(text, posX, width, color, callback)
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.fromOffset(width, 40)
+		b.Position = UDim2.fromOffset(posX, 16)
+		b.BackgroundColor3 = color
+		b.BackgroundTransparency = 0.15
+		b.Text = text
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 15
+		b.TextColor3 = Theme.Text
+		b.Parent = header
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 10)
+		b.MouseButton1Click:Connect(function()
+			API.PlaySound("rbxassetid://6895079853", 0.35, 1.15)
+			callback(b)
+		end)
+		return b
+	end
+
+	makeHeaderBtn("🎯 أمامي", 545, 110, Theme.CardHover, function()
+		local hrp = API.GetHRP()
+		if hrp then
+			local targetPos = (hrp.CFrame * CFrame.new(0, State.PanelHeight, -State.PanelDistance)).Position
+			State.AnchorCF = CFrame.lookAt(targetPos, hrp.Position + Vector3.new(0, 1.5, 0))
+			API.Notify("تم تقريب القائمة أمامك")
+		end
+	end)
+
+	makeHeaderBtn("📌 تتبع: لا", 665, 130, Theme.CardHover, function(btn)
+		State.FollowMode = not State.FollowMode
+		btn.Text = State.FollowMode and "📌 تتبع: نعم" or "📌 تتبع: لا"
+		btn.BackgroundColor3 = State.FollowMode and Theme.Secondary or Theme.CardHover
+		API.Notify(State.FollowMode and "القائمة تتبعك الآن" or "تم تثبيت القائمة في مكانها")
+	end)
+
+	makeHeaderBtn("👁️ فوق الكل", 805, 135, Theme.CardHover, function(btn)
+		State.AlwaysOnTop = not State.AlwaysOnTop
+		if State.SurfaceGui then
+			State.SurfaceGui.AlwaysOnTop = State.AlwaysOnTop
+		end
+		btn.BackgroundColor3 = State.AlwaysOnTop and Theme.Primary or Theme.CardHover
+		btn.TextColor3 = State.AlwaysOnTop and Theme.Bg or Theme.Text
+	end)
+
+	makeHeaderBtn("✖ إخفاء", 950, 150, Theme.Danger, function()
+		API.TogglePanel(false)
+	end)
+
+	-- شريط البحث وحقل القيمة
+	local searchFrame = Instance.new("Frame")
+	searchFrame.Size = UDim2.new(1, -30, 0, 56)
+	searchFrame.Position = UDim2.fromOffset(15, 96)
+	searchFrame.BackgroundColor3 = Theme.Panel
+	searchFrame.BackgroundTransparency = 0.25
+	searchFrame.Parent = root
+	Instance.new("UICorner", searchFrame).CornerRadius = UDim.new(0, 12)
+
+	local searchBox = Instance.new("TextBox")
+	searchBox.Size = UDim2.new(0.58, -15, 0, 40)
+	searchBox.Position = UDim2.fromOffset(10, 8)
+	searchBox.BackgroundColor3 = Theme.Card
+	searchBox.PlaceholderText = "🔍 ابحث عن أمر بالاسم أو الوصف..."
+	searchBox.PlaceholderColor3 = Theme.SubText
+	searchBox.Text = ""
+	searchBox.TextColor3 = Theme.Text
+	searchBox.Font = Enum.Font.GothamSemibold
+	searchBox.TextSize = 18
+	searchBox.ClearTextOnFocus = false
+	searchBox.Parent = searchFrame
+	Instance.new("UICorner", searchBox).CornerRadius = UDim.new(0, 10)
+	UI.SearchBox = searchBox
+
+	searchBox:GetPropertyChangedSignal("Text"):Connect(function()
+		State.SearchQuery = string.lower(searchBox.Text)
+		RefreshCommandGrid()
+	end)
+
+	local argBox = Instance.new("TextBox")
+	argBox.Size = UDim2.new(0.42, -15, 0, 40)
+	argBox.Position = UDim2.new(0.58, 5, 0, 8)
+	argBox.BackgroundColor3 = Theme.Card
+	argBox.PlaceholderText = "⚙️ القيمة (مثال: 100 أو معرف صوت)"
+	argBox.PlaceholderColor3 = Theme.SubText
+	argBox.Text = ""
+	argBox.TextColor3 = Theme.Primary
+	argBox.Font = Enum.Font.GothamBold
+	argBox.TextSize = 18
+	argBox.ClearTextOnFocus = false
+	argBox.Parent = searchFrame
+	Instance.new("UICorner", argBox).CornerRadius = UDim.new(0, 10)
+	UI.ArgBox = argBox
+
+	-- شريط الفئات (اليسار)
+	local catScroll = Instance.new("ScrollingFrame")
+	catScroll.Size = UDim2.new(0, 230, 1, -222)
+	catScroll.Position = UDim2.fromOffset(15, 164)
+	catScroll.BackgroundColor3 = Theme.Panel
+	catScroll.BackgroundTransparency = 0.25
+	catScroll.ScrollBarThickness = 6
+	catScroll.ScrollBarImageColor3 = Theme.Primary
+	catScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	catScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	catScroll.Parent = root
+	Instance.new("UICorner", catScroll).CornerRadius = UDim.new(0, 14)
+
+	local catLayout = Instance.new("UIListLayout")
+	catLayout.Padding = UDim.new(0, 8)
+	catLayout.Parent = catScroll
+
+	local catPad = Instance.new("UIPadding")
+	catPad.PaddingTop = UDim.new(0, 10)
+	catPad.PaddingBottom = UDim.new(0, 10)
+	catPad.PaddingLeft = UDim.new(0, 10)
+	catPad.PaddingRight = UDim.new(0, 10)
+	catPad.Parent = catScroll
+	UI.CatScroll = catScroll
+
+	-- شبكة الأوامر (اليمين)
+	local cmdScroll = Instance.new("ScrollingFrame")
+	cmdScroll.Size = UDim2.new(1, -272, 1, -222)
+	cmdScroll.Position = UDim2.fromOffset(257, 164)
+	cmdScroll.BackgroundColor3 = Theme.Panel
+	cmdScroll.BackgroundTransparency = 0.25
+	cmdScroll.ScrollBarThickness = 8
+	cmdScroll.ScrollBarImageColor3 = Theme.Primary
+	cmdScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+	cmdScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	cmdScroll.Parent = root
+	Instance.new("UICorner", cmdScroll).CornerRadius = UDim.new(0, 14)
+
+	local grid = Instance.new("UIGridLayout")
+	grid.CellSize = UDim2.fromOffset(265, 96)
+	grid.CellPadding = UDim2.fromOffset(12, 12)
+	grid.SortOrder = Enum.SortOrder.LayoutOrder
+	grid.Parent = cmdScroll
+
+	local cmdPad = Instance.new("UIPadding")
+	cmdPad.PaddingTop = UDim.new(0, 12)
+	cmdPad.PaddingBottom = UDim.new(0, 12)
+	cmdPad.PaddingLeft = UDim.new(0, 12)
+	cmdPad.PaddingRight = UDim.new(0, 12)
+	cmdPad.Parent = cmdScroll
+	UI.CmdScroll = cmdScroll
+
+	-- شريط الحالة السفلي
+	local status = Instance.new("TextLabel")
+	status.Size = UDim2.new(1, -30, 0, 38)
+	status.Position = UDim2.new(0, 15, 1, -48)
+	status.BackgroundColor3 = Theme.Panel
+	status.BackgroundTransparency = 0.2
+	status.Text = "✨ جاهز — اضغط على أي أمر لتنفيذه فوراً"
+	status.Font = Enum.Font.GothamBold
+	status.TextSize = 17
+	status.TextColor3 = Theme.Primary
+	status.Parent = root
+	Instance.new("UICorner", status).CornerRadius = UDim.new(0, 10)
+	UI.StatusLabel = status
+end
+
+local function RebuildCategories()
+	if not UI.CatScroll then return end
+	for _, ch in ipairs(UI.CatScroll:GetChildren()) do
+		if ch:IsA("TextButton") then ch:Destroy() end
+	end
+	for _, catName in ipairs(CategoryList) do
+		local b = Instance.new("TextButton")
+		b.Size = UDim2.new(1, 0, 0, 44)
+		b.BackgroundColor3 = (State.SelectedCategory == catName) and Theme.Primary or Theme.Card
+		b.TextColor3 = (State.SelectedCategory == catName) and Theme.Bg or Theme.Text
+		b.Text = catName
+		b.Font = Enum.Font.GothamBold
+		b.TextSize = 17
+		b.Parent = UI.CatScroll
+		Instance.new("UICorner", b).CornerRadius = UDim.new(0, 10)
+		b.MouseButton1Click:Connect(function()
+			API.PlaySound("rbxassetid://6895079853", 0.3, 1.2)
+			State.SelectedCategory = catName
+			RebuildCategories()
+			RefreshCommandGrid()
+		end)
+	end
+end
+
+RefreshCommandGrid = function()
+	if not UI.CmdScroll then return end
+	for _, ch in ipairs(UI.CmdScroll:GetChildren()) do
+		if ch:IsA("TextButton") then ch:Destroy() end
+	end
+
+	local shown = 0
+	for i, cmd in ipairs(Commands) do
+		local catMatch = (State.SelectedCategory == "الكل") or (cmd.Category == State.SelectedCategory)
+		local q = State.SearchQuery
+		local textMatch = (q == "")
+			or string.find(string.lower(cmd.Name), q, 1, true)
+			or string.find(string.lower(cmd.Display), q, 1, true)
+			or string.find(string.lower(cmd.Desc), q, 1, true)
+
+		if catMatch and textMatch then
+			shown += 1
+			local card = Instance.new("TextButton")
+			card.LayoutOrder = i
+			card.BackgroundColor3 = Theme.Card
+			card.Text = ""
+			card.AutoButtonColor = false
+			card.Parent = UI.CmdScroll
+			Instance.new("UICorner", card).CornerRadius = UDim.new(0, 12)
+
+			local stroke = Instance.new("UIStroke")
+			stroke.Color = Theme.Primary
+			stroke.Transparency = 0.72
+			stroke.Thickness = 1.4
+			stroke.Parent = card
+
+			local nameLbl = Instance.new("TextLabel")
+			nameLbl.Size = UDim2.new(1, -18, 0, 28)
+			nameLbl.Position = UDim2.fromOffset(10, 8)
+			nameLbl.BackgroundTransparency = 1
+			nameLbl.Text = cmd.Display .. "  [" .. cmd.Name .. "]"
+			nameLbl.Font = Enum.Font.GothamBold
+			nameLbl.TextSize = 16
+			nameLbl.TextXAlignment = Enum.TextXAlignment.Left
+			nameLbl.TextColor3 = Theme.Text
+			nameLbl.TextTruncate = Enum.TextTruncate.AtEnd
+			nameLbl.Parent = card
+
+			local descLbl = Instance.new("TextLabel")
+			descLbl.Size = UDim2.new(1, -18, 0, 44)
+			descLbl.Position = UDim2.fromOffset(10, 38)
+			descLbl.BackgroundTransparency = 1
+			descLbl.Text = cmd.Desc
+			descLbl.Font = Enum.Font.Gotham
+			descLbl.TextSize = 14
+			descLbl.TextWrapped = true
+			descLbl.TextXAlignment = Enum.TextXAlignment.Left
+			descLbl.TextYAlignment = Enum.TextYAlignment.Top
+			descLbl.TextColor3 = Theme.SubText
+			descLbl.Parent = card
+
+			card.MouseEnter:Connect(function()
+				card.BackgroundColor3 = Theme.CardHover
+				stroke.Transparency = 0.1
+			end)
+			card.MouseLeave:Connect(function()
+				card.BackgroundColor3 = Theme.Card
+				stroke.Transparency = 0.72
+			end)
+			card.MouseButton1Click:Connect(function()
+				local arg = UI.ArgBox and UI.ArgBox.Text or ""
+				local ok, result = pcall(cmd.Run, arg)
+				if ok then
+					API.Notify(tostring(result or ("تم تنفيذ: " .. cmd.Display)), false)
+				else
+					API.Notify("خطأ: " .. tostring(result), true)
+				end
+			end)
+		end
+	end
+
+	if UI.CountBadge then
+		UI.CountBadge.Text = shown .. " / " .. #Commands .. " أمر"
+	end
+end
+
+-- مؤثرات نزول وصعود الهولوجرام الـ 3D
+local function SpawnLandingBurst(cf: CFrame)
+	local fxPart = Instance.new("Part")
+	fxPart.Anchored = true
+	fxPart.CanCollide = false
+	fxPart.Transparency = 1
+	fxPart.Size = Vector3.new(1, 1, 1)
+	fxPart.CFrame = cf
+	fxPart.Parent = Workspace
+
+	local pe = Instance.new("ParticleEmitter")
+	pe.Color = ColorSequence.new(Theme.Primary, Theme.Secondary)
+	pe.Size = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.35), NumberSequenceKeypoint.new(1, 0) })
+	pe.Lifetime = NumberRange.new(0.4, 0.9)
+	pe.Speed = NumberRange.new(6, 14)
+	pe.SpreadAngle = Vector2.new(180, 180)
+	pe.Rate = 0
+	pe.Parent = fxPart
+	pe:Emit(35)
+	Debris:AddItem(fxPart, 1.5)
+end
+
+function API.TogglePanel(forceState: boolean?)
+	if forceState ~= nil then
+		State.IsOpen = forceState
+	else
+		State.IsOpen = not State.IsOpen
+	end
+
+	if not State.HoloPart then
+		Build3DInterface()
+		RebuildCategories()
+		RefreshCommandGrid()
+	end
+
+	local hrp = API.GetHRP()
+	if State.IsOpen then
+		API.PlaySound("rbxassetid://7035166082", 0.5, 1.05)
+		local targetPos = hrp and (hrp.CFrame * CFrame.new(0, State.PanelHeight, -State.PanelDistance)).Position
+			or Vector3.new(0, 8, 0)
+		local lookAt = hrp and (hrp.Position + Vector3.new(0, 1.5, 0)) or Vector3.new(0, 8, 10)
+		local targetCF = CFrame.lookAt(targetPos, lookAt)
+		State.AnchorCF = targetCF
+
+		-- بداية النزول من السماء
+		State.HoloPart.Parent = Workspace
+		State.SurfaceGui.Enabled = true
+		State.HoloPart.Size = Vector3.new(2, 0.3, 0.14)
+		State.HoloPart.CFrame = targetCF * CFrame.new(0, 15, 0)
+		State.SelectionBox.Transparency = 0
+
+		TweenService:Create(
+			State.HoloPart,
+			TweenInfo.new(0.55, Enum.EasingStyle.Back, Enum.EasingDirection.Out),
+			{ CFrame = targetCF, Size = Vector3.new(11.5, 7.4, 0.14) }
+		):Play()
+
+		task.delay(0.35, function()
+			if State.IsOpen then
+				SpawnLandingBurst(targetCF)
+			end
+		end)
+		if UI.LauncherBtn then
+			UI.LauncherBtn.Text = "✖ إخفاء القائمة [F2]"
+		end
+	else
+		API.PlaySound("rbxassetid://7035166082", 0.4, 0.75)
+		local exitCF = State.AnchorCF * CFrame.new(0, 14, 0)
+		local tw = TweenService:Create(
+			State.HoloPart,
+			TweenInfo.new(0.35, Enum.EasingStyle.Quint, Enum.EasingDirection.In),
+			{ CFrame = exitCF, Size = Vector3.new(2, 0.2, 0.14) }
+		)
+		tw:Play()
+		tw.Completed:Connect(function()
+			if not State.IsOpen and State.HoloPart then
+				State.SurfaceGui.Enabled = false
+				State.HoloPart.Parent = nil
+			end
+		end)
+		if UI.LauncherBtn then
+			UI.LauncherBtn.Text = "⚡ قائمة الأوامر [F2]"
+		end
+	end
+end
+
+-- ============================================================================
+-- حزمة الأوامر الأساسية (75 أمراً حقيقياً متنوعاً وشغالاً 100%)
+-- ============================================================================
+
+-- [1] الحركة والفيزياء (18 أمراً)
+API.Register({ Name = "speed", Display = "تعديل السرعة", Category = "الحركة", Desc = "ضبط سرعة المشي (الطبيعي 16)", Run = function(arg)
+	local h = API.GetHum(); if not h then return "لا توجد شخصية" end
+	local v = math.clamp(tonumber(arg) or 65, 0, 500)
+	h.WalkSpeed = v; return "السرعة الآن: " .. v
+end })
+
+API.Register({ Name = "resetspeed", Display = "إرجاع السرعة", Category = "الحركة", Desc = "إرجاع سرعة المشي للوضع الطبيعي 16", Run = function()
+	local h = API.GetHum(); if h then h.WalkSpeed = 16 end; return "تم إرجاع السرعة إلى 16"
+end })
+
+API.Register({ Name = "jump", Display = "قوة القفز", Category = "الحركة", Desc = "ضبط ارتفاع القفزة (الطبيعي 50)", Run = function(arg)
+	local h = API.GetHum(); if not h then return "لا توجد شخصية" end
+	local v = math.clamp(tonumber(arg) or 120, 0, 500)
+	h.UseJumpPower = true; h.JumpPower = v; return "قوة القفز: " .. v
+end })
+
+API.Register({ Name = "resetjump", Display = "إرجاع القفز", Category = "الحركة", Desc = "إرجاع القفز إلى 50", Run = function()
+	local h = API.GetHum(); if h then h.UseJumpPower = true; h.JumpPower = 50 end; return "تم إرجاع القفز"
+end })
+
+API.Register({ Name = "fly", Display = "تفعيل الطيران", Category = "الحركة", Desc = "طيران حر بالاتجاه الذي تنظر إليه (WASD)", Run = function(arg)
+	local hrp = API.GetHRP(); local hum = API.GetHum()
+	if not hrp or not hum then return "لا توجد شخصية" end
+	if arg ~= "" and tonumber(arg) then State.FlySpeed = math.clamp(tonumber(arg), 10, 400) end
+	if State.Flying then return "الطيران مفعل مسبقاً" end
+	State.Flying = true
+	hum.PlatformStand = true
+	local bv = Instance.new("BodyVelocity")
+	bv.MaxForce = Vector3.new(math.huge, math.huge, math.huge)
+	bv.Velocity = Vector3.zero
+	bv.Parent = hrp
+	local bg = Instance.new("BodyGyro")
+	bg.MaxTorque = Vector3.new(math.huge, math.huge, math.huge)
+	bg.P = 90000
+	bg.CFrame = hrp.CFrame
+	bg.Parent = hrp
+	State.FlyBV = bv; State.FlyBG = bg
+	return "تم تفعيل الطيران (السرعة " .. State.FlySpeed .. ")"
+end })
+
+API.Register({ Name = "unfly", Display = "إيقاف الطيران", Category = "الحركة", Desc = "إلغاء الطيران والعودة للمشي", Run = function()
+	State.Flying = false
+	if State.FlyBV then State.FlyBV:Destroy(); State.FlyBV = nil end
+	if State.FlyBG then State.FlyBG:Destroy(); State.FlyBG = nil end
+	local hum = API.GetHum(); if hum then hum.PlatformStand = false end
+	return "تم إيقاف الطيران"
+end })
+
+API.Register({ Name = "flyspeed", Display = "سرعة الطيران", Category = "الحركة", Desc = "تغيير سرعة الطيران (افتراضي 75)", Run = function(arg)
+	State.FlySpeed = math.clamp(tonumber(arg) or 120, 10, 500)
+	return "سرعة الطيران: " .. State.FlySpeed
+end })
+
+API.Register({ Name = "noclip", Display = "اختراق الجدران", Category = "الحركة", Desc = "المشي والطيران عبر الجدران", Run = function()
+	State.Noclip = true; return "تم تفعيل اختراق الجدران"
+end })
+
+API.Register({ Name = "unnoclip", Display = "إيقاف الاختراق", Category = "الحركة", Desc = "إرجاع التصادم الطبيعي مع الجدران", Run = function()
+	State.Noclip = false
+	local c = API.GetChar()
+	if c then
+		for _, p in ipairs(c:GetDescendants()) do
+			if p:IsA("BasePart") then p.CanCollide = true end
+		end
+	end
+	return "تم إيقاف اختراق الجدران"
+end })
+
+API.Register({ Name = "infjump", Display = "قفز لا نهائي", Category = "الحركة", Desc = "القفز في الهواء بلا حدود", Run = function()
+	State.InfJump = true; return "تم تفعيل القفز اللانهائي"
+end })
+
+API.Register({ Name = "uninfjump", Display = "إلغاء القفز اللانهائي", Category = "الحركة", Desc = "إيقاف القفز في الهواء", Run = function()
+	State.InfJump = false; return "تم إيقاف القفز اللانهائي"
+end })
+
+API.Register({ Name = "gravity", Display = "تعديل الجاذبية", Category = "الحركة", Desc = "ضبط جاذبية العالم محلياً (الطبيعي 196.2)", Run = function(arg)
+	local v = math.clamp(tonumber(arg) or 80, 0, 1000)
+	Workspace.Gravity = v; return "الجاذبية الآن: " .. v
+end })
+
+API.Register({ Name = "moongravity", Display = "جاذبية القمر", Category = "الحركة", Desc = "جعل الجاذبية خفيفة كالقمر (35)", Run = function()
+	Workspace.Gravity = 35; return "تم تفعيل جاذبية القمر"
+end })
+
+API.Register({ Name = "zerogravity", Display = "انعدام الجاذبية", Category = "الحركة", Desc = "جعل الجاذبية 5 للطفو في الجو", Run = function()
+	Workspace.Gravity = 5; return "تم تقليل الجاذبية للطفو"
+end })
+
+API.Register({ Name = "normalgravity", Display = "جاذبية طبيعية", Category = "الحركة", Desc = "إرجاع الجاذبية إلى 196.2", Run = function()
+	Workspace.Gravity = 196.2; return "الجاذبية طبيعية الآن"
+end })
+
+API.Register({ Name = "dash", Display = "اندفاع سريع", Category = "الحركة", Desc = "قفزة اندفاع قوية للأمام فوراً", Run = function(arg)
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	local power = math.clamp(tonumber(arg) or 110, 20, 400)
+	hrp.AssemblyLinearVelocity = hrp.CFrame.LookVector * power + Vector3.new(0, 20, 0)
+	return "اندفاع بقوة " .. power
+end })
+
+API.Register({ Name = "hipheight", Display = "ارتفاع الورك", Category = "الحركة", Desc = "رفع شخصيتك فوق الأرض", Run = function(arg)
+	local h = API.GetHum(); if not h then return "لا توجد شخصية" end
+	local v = math.clamp(tonumber(arg) or 4, 0, 50)
+	h.HipHeight = v; return "تم ضبط HipHeight على " .. v
+end })
+
+API.Register({ Name = "airswim", Display = "السباحة في الهواء", Category = "الحركة", Desc = "تفعيل حركة السباحة داخل الجو", Run = function()
+	local h = API.GetHum(); if not h then return "لا توجد شخصية" end
+	h:ChangeState(Enum.HumanoidStateType.Swimming); return "تم تفعيل وضع السباحة"
+end })
+
+-- [2] الشخصية والمظهر (16 أمراً)
+API.Register({ Name = "heal", Display = "علاج كامل", Category = "الشخصية", Desc = "تعبئة الدم للحد الأقصى", Run = function()
+	local h = API.GetHum(); if h then h.Health = h.MaxHealth end; return "تم العلاج بالكامل"
+end })
+
+API.Register({ Name = "god", Display = "حماية خلود", Category = "الشخصية", Desc = "رفع الدم إلى ما لا نهاية محلياً", Run = function()
+	local h = API.GetHum(); if h then h.MaxHealth = math.huge; h.Health = math.huge end; return "تم تفعيل الخلود"
+end })
+
+API.Register({ Name = "ungod", Display = "إلغاء الخلود", Category = "الشخصية", Desc = "إرجاع الدم إلى 100", Run = function()
+	local h = API.GetHum(); if h then h.MaxHealth = 100; h.Health = 100 end; return "تم إرجاع الدم لـ 100"
+end })
+
+API.Register({ Name = "ff", Display = "درع طاقة", Category = "الشخصية", Desc = "وضع درع ForceField حول شخصيتك", Run = function()
+	local c = API.GetChar(); if c and not c:FindFirstChildOfClass("ForceField") then Instance.new("ForceField", c) end
+	return "تم تفعيل درع الطاقة"
+end })
+
+API.Register({ Name = "unff", Display = "إزالة الدرع", Category = "الشخصية", Desc = "إزالة درع ForceField", Run = function()
+	local c = API.GetChar()
+	if c then for _, v in ipairs(c:GetChildren()) do if v:IsA("ForceField") then v:Destroy() end end end
+	return "تمت إزالة الدرع"
+end })
+
+API.Register({ Name = "invisible", Display = "إخفاء الشخصية", Category = "الشخصية", Desc = "جعل شخصيتك شفافة تماماً", Run = function()
+	local c = API.GetChar(); if not c then return "لا توجد شخصية" end
+	for _, v in ipairs(c:GetDescendants()) do
+		if v:IsA("BasePart") or v:IsA("Decal") then v.Transparency = 1 end
+	end
+	return "تم إخفاء الشخصية"
+end })
+
+API.Register({ Name = "visible", Display = "إظهار الشخصية", Category = "الشخصية", Desc = "إعادة ظهور الشخصية", Run = function()
+	local c = API.GetChar(); if not c then return "لا توجد شخصية" end
+	for _, v in ipairs(c:GetDescendants()) do
+		if (v:IsA("BasePart") or v:IsA("Decal")) and v.Name ~= "HumanoidRootPart" then
+			v.Transparency = 0
+		end
+	end
+	return "تم إظهار الشخصية"
+end })
+
+API.Register({ Name = "spin", Display = "تدوير مستمر", Category = "الشخصية", Desc = "جعل شخصيتك تدور كالإعصار", Run = function(arg)
+	State.SpinSpeed = math.clamp(tonumber(arg) or 14, 1, 80)
+	State.Spinning = true; return "بدأ الدوران بسرعة " .. State.SpinSpeed
+end })
+
+API.Register({ Name = "unspin", Display = "إيقاف الدوران", Category = "الشخصية", Desc = "إيقاف الدوران المستمر", Run = function()
+	State.Spinning = false; return "تم إيقاف الدوران"
+end })
+
+API.Register({ Name = "sit", Display = "جلوس", Category = "الشخصية", Desc = "إجلاس الشخصية فوراً", Run = function()
+	local h = API.GetHum(); if h then h.Sit = true end; return "تم الجلوس"
+end })
+
+API.Register({ Name = "trip", Display = "سقوط طريف", Category = "الشخصية", Desc = "تفعيل وضع السقوط/Ragdoll للحظات", Run = function()
+	local h = API.GetHum(); if h then h.PlatformStand = true; task.delay(1.5, function() if h then h.PlatformStand = false end end) end
+	return "سقوط لمدة 1.5 ثانية"
+end })
+
+API.Register({ Name = "giant", Display = "حجم عملاق", Category = "الشخصية", Desc = "تكبير حجم شخصيتك (R15)", Run = function(arg)
+	local h = API.GetHum(); if not h then return "لا توجد شخصية" end
+	local s = math.clamp(tonumber(arg) or 2.5, 0.5, 10)
+	for _, n in ipairs({"BodyHeightScale", "BodyWidthScale", "BodyDepthScale", "HeadScale"}) do
+		local val = h:FindFirstChild(n)
+		if val then val.Value = s end
+	end
+	return "تم التكبير ×" .. s
+end })
+
+API.Register({ Name = "tiny", Display = "حجم قزم", Category = "الشخصية", Desc = "تصغير حجم شخصيتك (R15)", Run = function()
+	local h = API.GetHum(); if not h then return "لا توجد شخصية" end
+	for _, n in ipairs({"BodyHeightScale", "BodyWidthScale", "BodyDepthScale", "HeadScale"}) do
+		local val = h:FindFirstChild(n)
+		if val then val.Value = 0.4 end
+	end
+	return "تم التصغير إلى 0.4"
+end })
+
+API.Register({ Name = "normalsize", Display = "الحجم الطبيعي", Category = "الشخصية", Desc = "إرجاع أبعاد الشخصية إلى 1", Run = function()
+	local h = API.GetHum(); if not h then return "لا توجد شخصية" end
+	for _, n in ipairs({"BodyHeightScale", "BodyWidthScale", "BodyDepthScale", "HeadScale"}) do
+		local val = h:FindFirstChild(n)
+		if val then val.Value = 1 end
+	end
+	return "تم إرجاع الحجم الطبيعي"
+end })
+
+API.Register({ Name = "bighead", Display = "رأس ضخم", Category = "الشخصية", Desc = "تكبير حجم الرأس فقط (R15)", Run = function()
+	local h = API.GetHum(); local v = h and h:FindFirstChild("HeadScale")
+	if v then v.Value = 3 end; return "تم تكبير الرأس"
+end })
+
+API.Register({ Name = "clone", Display = "استنساخ شخصيتي", Category = "الشخصية", Desc = "صنع نسخة مجسمة من شخصيتك أمامك", Run = function()
+	local c = API.GetChar(); local hrp = API.GetHRP()
+	if not c or not hrp then return "لا توجد شخصية" end
+	c.Archivable = true
+	local cl = c:Clone()
+	c.Archivable = false
+	for _, v in ipairs(cl:GetDescendants()) do if v:IsA("LocalScript") or v:IsA("Script") then v:Destroy() end end
+	cl.Parent = API.GetBuildsFolder()
+	cl:PivotTo(hrp.CFrame * CFrame.new(0, 0, -5))
+	return "تم صنع نسخة أمامك"
+end })
+
+-- [3] الهالات والمؤثرات الخاصة بالشخصية (12 أمراً)
+API.Register({ Name = "aura", Display = "هالة قوس قزح", Category = "المؤثرات", Desc = "إحاطة شخصيتك بتوهج RGB متحرك", Run = function()
+	local c = API.GetChar(); if not c then return "لا توجد شخصية" end
+	if State.AuraHighlight then State.AuraHighlight:Destroy() end
+	local hl = Instance.new("Highlight")
+	hl.Name = "NexusRainbowAura"
+	hl.FillTransparency = 0.65
+	hl.OutlineTransparency = 0
+	hl.Parent = c
+	State.AuraHighlight = hl
+	State.AuraLoop = true
+	return "تم تفعيل هالة قوس قزح"
+end })
+
+API.Register({ Name = "unaura", Display = "إيقاف الهالة", Category = "المؤثرات", Desc = "إزالة توهج RGB عن الشخصية", Run = function()
+	State.AuraLoop = false
+	if State.AuraHighlight then State.AuraHighlight:Destroy(); State.AuraHighlight = nil end
+	return "تمت إزالة الهالة"
+end })
+
+API.Register({ Name = "fire", Display = "نار مشتعلة", Category = "المؤثرات", Desc = "إشعال نار زرقاء/سماوية حولك", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	local f = Instance.new("Fire", hrp); f.Name = "NexusFX"; f.Color = Theme.Primary; f.SecondaryColor = Theme.Secondary; f.Size = 7
+	return "تم تفعيل النار"
+end })
+
+API.Register({ Name = "unfire", Display = "إطفاء النار", Category = "المؤثرات", Desc = "إزالة النار عن شخصيتك", Run = function()
+	local hrp = API.GetHRP(); if hrp then for _, v in ipairs(hrp:GetChildren()) do if v:IsA("Fire") then v:Destroy() end end end
+	return "تم إطفاء النار"
+end })
+
+API.Register({ Name = "smoke", Display = "دخان طاقة", Category = "المؤثرات", Desc = "إخراج دخان متوهج من الشخصية", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	local s = Instance.new("Smoke", hrp); s.Name = "NexusFX"; s.Color = Theme.Primary; s.Opacity = 0.45
+	return "تم تفعيل الدخان"
+end })
+
+API.Register({ Name = "unsmoke", Display = "إزالة الدخان", Category = "المؤثرات", Desc = "إيقاف الدخان", Run = function()
+	local hrp = API.GetHRP(); if hrp then for _, v in ipairs(hrp:GetChildren()) do if v:IsA("Smoke") then v:Destroy() end end end
+	return "تمت إزالة الدخان"
+end })
+
+API.Register({ Name = "sparkles", Display = "شرارات سحرية", Category = "المؤثرات", Desc = "تطاير شرارات لامعة حول جسمك", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	local sp = Instance.new("Sparkles", hrp); sp.Name = "NexusFX"; sp.SparkleColor = Theme.Primary
+	return "تم تفعيل الشرارات"
+end })
+
+API.Register({ Name = "unsparkles", Display = "إزالة الشرارات", Category = "المؤثرات", Desc = "إيقاف الشرارات", Run = function()
+	local hrp = API.GetHRP(); if hrp then for _, v in ipairs(hrp:GetChildren()) do if v:IsA("Sparkles") then v:Destroy() end end end
+	return "تمت إزالة الشرارات"
+end })
+
+API.Register({ Name = "trail", Display = "ذيل طاقة نيون", Category = "المؤثرات", Desc = "رسم خط نيون مضيء خلفك أثناء الجري", Run = function()
+	local c = API.GetChar(); local hrp = API.GetHRP(); local head = c and c:FindFirstChild("Head")
+	if not hrp or not head then return "لا توجد شخصية" end
+	local a0 = Instance.new("Attachment", head); a0.Name = "NexusTrailA0"
+	local a1 = Instance.new("Attachment", hrp); a1.Name = "NexusTrailA1"
+	local tr = Instance.new("Trail", hrp)
+	tr.Name = "NexusTrail"
+	tr.Attachment0 = a0; tr.Attachment1 = a1
+	tr.Color = ColorSequence.new(Theme.Primary, Theme.Secondary)
+	tr.Lifetime = 0.8
+	tr.LightEmission = 1
+	return "تم تفعيل ذيل الطاقة"
+end })
+
+API.Register({ Name = "untrail", Display = "إزالة ذيل الطاقة", Category = "المؤثرات", Desc = "حذف الخط المضيء خلفك", Run = function()
+	local c = API.GetChar(); if not c then return "لا توجد شخصية" end
+	for _, v in ipairs(c:GetDescendants()) do
+		if v.Name == "NexusTrail" or v.Name == "NexusTrailA0" or v.Name == "NexusTrailA1" then v:Destroy() end
+	end
+	return "تم حذف ذيل الطاقة"
+end })
+
+API.Register({ Name = "halo", Display = "هالة فوق الرأس", Category = "المؤثرات", Desc = "وضع حلقة نيون مضيئة فوق رأسك", Run = function()
+	local c = API.GetChar(); local head = c and c:FindFirstChild("Head")
+	if not head then return "لا توجد شخصية" end
+	local ring = Instance.new("Part")
+	ring.Name = "NexusHalo"
+	ring.Shape = Enum.PartType.Cylinder
+	ring.Size = Vector3.new(0.15, 2.6, 2.6)
+	ring.Material = Enum.Material.Neon
+	ring.Color = Theme.Primary
+	ring.CanCollide = false
+	ring.Massless = true
+	ring.CFrame = head.CFrame * CFrame.new(0, 1.4, 0) * CFrame.Angles(0, 0, math.rad(90))
+	ring.Parent = c
+	local w = Instance.new("WeldConstraint", ring); w.Part0 = head; w.Part1 = ring
+	return "تم تركيب هالة الرأس"
+end })
+
+API.Register({ Name = "orbitcubes", Display = "مكعبات مدارية", Category = "المؤثرات", Desc = "3 مكعبات نيون تسبح حولك باستمرار", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	for i = 1, 3 do
+		local cube = Instance.new("Part")
+		cube.Name = "NexusOrbitCube"
+		cube.Anchored = true; cube.CanCollide = false
+		cube.Size = Vector3.new(0.8, 0.8, 0.8)
+		cube.Material = Enum.Material.Neon
+		cube.Color = (i % 2 == 0) and Theme.Secondary or Theme.Primary
+		cube.Parent = API.GetBuildsFolder()
+		local angleOffset = (i - 1) * (math.pi * 2 / 3)
+		task.spawn(function()
+			while cube.Parent and hrp.Parent do
+				local t = os.clock() * 2.5 + angleOffset
+				cube.CFrame = CFrame.new(hrp.Position + Vector3.new(math.cos(t) * 4, math.sin(t * 1.5) * 1.2 + 1, math.sin(t) * 4))
+					* CFrame.Angles(t, t * 0.7, 0)
+				RunService.RenderStepped:Wait()
+			end
+		end)
+	end
+	return "تم إطلاق المكعبات المدارية"
+end })
+
+-- [4] التنقل والمباني المحلية (12 أمراً)
+API.Register({ Name = "tp_mouse", Display = "انتقال لمكان الماوس", Category = "التنقل والبناء", Desc = "ينقلك فوراً إلى النقطة التي يشير إليها الماوس", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	State.LastPos = hrp.CFrame
+	hrp.CFrame = CFrame.new(Mouse.Hit.Position + Vector3.new(0, 3.5, 0))
+	return "تم الانتقال لمؤشر الماوس"
+end })
+
+API.Register({ Name = "savepos", Display = "حفظ الموقع", Category = "التنقل والبناء", Desc = "حفظ موقعك الحالي للرجوع له لاحقاً", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	State.SavedPos = hrp.CFrame; return "تم حفظ الإحداثيات"
+end })
+
+API.Register({ Name = "loadpos", Display = "العودة للمحفوظ", Category = "التنقل والبناء", Desc = "الانتقال للموقع الذي حفظته", Run = function()
+	local hrp = API.GetHRP()
+	if not hrp or not State.SavedPos then return "لم تحفظ موقعاً بعد" end
+	State.LastPos = hrp.CFrame; hrp.CFrame = State.SavedPos
+	return "تمت العودة للموقع المحفوظ"
+end })
+
+API.Register({ Name = "back", Display = "رجوع خطوة", Category = "التنقل والبناء", Desc = "الرجوع لآخر موقع قبل الانتقال", Run = function()
+	local hrp = API.GetHRP()
+	if not hrp or not State.LastPos then return "لا يوجد موقع سابق" end
+	hrp.CFrame = State.LastPos; return "تم الرجوع"
+end })
+
+API.Register({ Name = "up", Display = "ارتفاع للسماء", Category = "التنقل والبناء", Desc = "يرفعك للأعلى بمقدار القيمة (افتراضي 60)", Run = function(arg)
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	local h = tonumber(arg) or 60
+	State.LastPos = hrp.CFrame; hrp.CFrame = hrp.CFrame + Vector3.new(0, h, 0)
+	return "تم الارتفاع " .. h .. " ستد"
+end })
+
+API.Register({ Name = "platform", Display = "منصة تحت قدميك", Category = "التنقل والبناء", Desc = "صنع منصة نيون ثابتة تحتك مباشرة", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	local p = Instance.new("Part")
+	p.Anchored = true; p.Size = Vector3.new(12, 1, 12)
+	p.Material = Enum.Material.Neon; p.Color = Theme.Primary
+	p.Transparency = 0.25
+	p.CFrame = CFrame.new(hrp.Position - Vector3.new(0, 3.6, 0))
+	p.Parent = API.GetBuildsFolder()
+	return "تم إنشاء منصة نيون"
+end })
+
+API.Register({ Name = "trampoline", Display = "منصة قفز عالية", Category = "التنقل والبناء", Desc = "صنع ترامبولين يقذفك للأعلى عند لمسه", Run = function()
+	local hrp = API.GetHRP(); if not hrp then return "لا توجد شخصية" end
+	local pad = Instance.new("Part")
+	pad.Anchored = true; pad.Size = Vector3.new(8, 0.8, 8)
+	pad.Material = Enum.Material.Neon; pad.Color = Theme.Success
+	pad.CFrame = hrp.CFrame * CFrame.new(0, -2.5, -6)
+	pad.Parent = API.GetBuildsFolder()
+	pad.Touched:Connect(function(hit)
+		local p = hit.Parent and hit.Parent:FindFirstChild("HumanoidRootPart")
+		if p then p.AssemblyLinearVelocity = Vector3.new(0, 140, 0) end
+	end)
+	return "
